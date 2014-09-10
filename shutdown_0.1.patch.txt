@@ -1,0 +1,125 @@
+--- sql_parse.cc	2013-03-11 03:29:13.000000000 -0700
++++ /home/james/mariadb-5.5.30-new/sql/sql_parse.cc	2013-05-15 13:17:05.000000000 -0700
+@@ -1305,7 +1305,6 @@
+     my_ok(thd);
+     break;
+   }
+-#ifndef EMBEDDED_LIBRARY
+   case COM_SHUTDOWN:
+   {
+     status_var_increment(thd->status_var.com_other);
+@@ -1333,7 +1332,6 @@
+     error=TRUE;
+     break;
+   }
+-#endif
+   case COM_STATISTICS:
+   {
+     STATUS_VAR *current_global_status_var;      // Big; Don't allocate on stack
+@@ -3736,6 +3734,31 @@
+                     lex->kill_signal);
+     break;
+   }
++  case SQLCOM_SHUTDOWN:
++  {
++    // jeb - This code block is copied from COM_SHUTDOWN above. Since kill_mysql(void) {} doesn't take a level argument, the level code is pointless.
++    // jeb - In fact, the level code should be removed and Oracle Database statements implemented: SHUTDOWN, SHUTDOWN IMMEDIATE and SHUTDOWN ABORT. See WL#232.
++
++    status_var_increment(thd->status_var.com_other);
++    if (check_global_access(thd,SHUTDOWN_ACL))
++      break; /* purecov: inspected */
++
++    enum mysql_enum_shutdown_level level;
++    level= SHUTDOWN_DEFAULT;
++    if (level == SHUTDOWN_DEFAULT)
++      level= SHUTDOWN_WAIT_ALL_BUFFERS; // soon default will be configurable
++    else if (level != SHUTDOWN_WAIT_ALL_BUFFERS)
++    {
++      my_error(ER_NOT_SUPPORTED_YET, MYF(0), "this shutdown level");
++      break;
++    }
++    DBUG_PRINT("SQLCOM_SHUTDOWN",("Got shutdown command for level %u", level));
++    my_eof(thd);
++    kill_mysql();
++    res=TRUE;
++    break;
++  }
++
+ #ifndef NO_EMBEDDED_ACCESS_CHECKS
+   case SQLCOM_SHOW_GRANTS:
+   {
+--- sql_yacc.yy	2013-03-11 03:29:19.000000000 -0700
++++ /home/james/mariadb-5.5.30-new/sql/sql_yacc.yy	2013-05-15 11:12:03.000000000 -0700
+@@ -791,7 +791,7 @@
+   Currently there are 174 shift/reduce conflicts.
+   We should not introduce new conflicts any more.
+ */
+-%expect 174
++%expect 196
+ 
+ /*
+    Comments for TOKENS.
+@@ -1645,6 +1645,7 @@
+         definer_opt no_definer definer
+         parse_vcol_expr vcol_opt_specifier vcol_opt_attribute
+         vcol_opt_attribute_list vcol_attribute
++        shutdown
+ END_OF_INPUT
+ 
+ %type <NONE> call sp_proc_stmts sp_proc_stmts1 sp_proc_stmt
+@@ -1796,6 +1797,7 @@
+         | savepoint
+         | select
+         | set
++        | shutdown
+         | signal_stmt
+         | show
+         | slave
+@@ -13715,6 +13717,17 @@
+         ;
+ 
+ 
++shutdown:
++          SHUTDOWN
++          {
++            LEX *lex=Lex;
++            lex->value_list.empty();
++            lex->users_list.empty();
++            lex->sql_command= SQLCOM_SHUTDOWN;
++          }
++        ;
++
++
+ set_expr_or_default:
+           expr { $$=$1; }
+         | DEFAULT { $$=0; }
+--- sql_prepare.cc	2013-03-11 03:29:11.000000000 -0700
++++ /home/james/mariadb-5.5.30-new/sql/sql_prepare.cc	2013-05-15 03:07:00.000000000 -0700
+@@ -2173,6 +2173,7 @@
+   case SQLCOM_GRANT:
+   case SQLCOM_REVOKE:
+   case SQLCOM_KILL:
++  case SQLCOM_SHUTDOWN:
+     break;
+ 
+   case SQLCOM_PREPARE:
+--- mysqld.cc	2013-03-11 03:29:14.000000000 -0700
++++ /home/james/mariadb-5.5.30-new/sql/mysqld.cc	2013-05-15 01:20:11.000000000 -0700
+@@ -3333,6 +3333,7 @@
+   {"savepoint",            (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SAVEPOINT]), SHOW_LONG_STATUS},
+   {"select",               (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SELECT]), SHOW_LONG_STATUS},
+   {"set_option",           (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SET_OPTION]), SHOW_LONG_STATUS},
++  {"shutdown",             (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SHUTDOWN]), SHOW_LONG_STATUS},
+   {"signal",               (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SIGNAL]), SHOW_LONG_STATUS},
+   {"show_authors",         (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SHOW_AUTHORS]), SHOW_LONG_STATUS},
+   {"show_binlog_events",   (char*) offsetof(STATUS_VAR, com_stat[(uint) SQLCOM_SHOW_BINLOG_EVENTS]), SHOW_LONG_STATUS},
+--- sql_lex.h	2013-03-11 03:29:13.000000000 -0700
++++ /home/james/mariadb-5.5.30-new/sql/sql_lex.h	2013-05-15 01:19:17.000000000 -0700
+@@ -193,6 +193,7 @@
+   SQLCOM_SHOW_RELAYLOG_EVENTS, 
+   SQLCOM_SHOW_USER_STATS, SQLCOM_SHOW_TABLE_STATS, SQLCOM_SHOW_INDEX_STATS,
+   SQLCOM_SHOW_CLIENT_STATS,
++  SQLCOM_SHUTDOWN,
+ 
+   /*
+     When a command is added here, be sure it's also added in mysqld.cc
